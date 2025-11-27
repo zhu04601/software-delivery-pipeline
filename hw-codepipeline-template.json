@@ -1,0 +1,372 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Parameters": {
+        "GitHubUsername": {
+            "Description": "GitHub username",
+            "Type": "String"
+        },
+        "GitHubAccessToken": {
+            "Description": "GitHub access token",
+            "Type": "String",
+            "NoEcho": true
+        },
+        "GitHubBranchName": {
+            "Description": "GitHub branch name",
+            "Type": "String",
+            "Default": "main"
+        },
+        "GitHubRepositoryName": {
+            "Description": "GitHub repository name",
+            "Type": "String",
+            "Default": "software-delivery-pipeline"
+        }
+    },
+    "Resources": {
+
+        "ArtifactBucket": {
+            "Type": "AWS::S3::Bucket",
+            "Properties": {
+                "BucketEncryption": {
+                    "ServerSideEncryptionConfiguration": [
+                        {
+                            "ServerSideEncryptionByDefault": {
+                                "SSEAlgorithm": "AES256"
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+
+        "ArtifactBucketPolicy": {
+            "Type": "AWS::S3::BucketPolicy",
+            "Properties": {
+                "Bucket": {
+                    "Ref": "ArtifactBucket"
+                },
+                "PolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Sid": "DenyUnEncryptedObjectUploads",
+                            "Effect": "Deny",
+                            "Principal": "*",
+                            "Action": "s3:PutObject",
+                            "Resource": {
+                                "Fn::Join": [
+                                    "",
+                                    [
+                                        {
+                                            "Fn::GetAtt": [
+                                                "ArtifactBucket",
+                                                "Arn"
+                                            ]
+                                        },
+                                        "/*"
+                                    ]
+                                ]
+                            },
+                            "Condition": {
+                                "StringNotEquals": {
+                                    "s3:x-amz-server-side-encryption": "aws:kms"
+                                }
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+
+        "AppBuildProject": {
+            "Type": "AWS::CodeBuild::Project",
+            "Properties": {
+                "Artifacts": {
+                    "Type": "CODEPIPELINE"
+                },
+                "Description": "app build project",
+                "Environment": {
+                    "ComputeType": "BUILD_GENERAL1_SMALL",
+                    "Image": "aws/codebuild/standard:5.0",
+                    "ImagePullCredentialsType": "CODEBUILD",
+                    "Type": "LINUX_CONTAINER"
+                },
+                "ServiceRole": { "Fn::GetAtt": [ "AppBuildRole", "Arn" ] },
+                "Source": {
+                    "Type": "CODEPIPELINE",
+                    "BuildSpec": "buildspec.yml"
+                }
+            }
+        },
+
+        "AppBuildRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+              "AssumeRolePolicyDocument": {
+                 "Version" : "2012-10-17",
+                 "Statement": [ {
+                    "Effect": "Allow",
+                    "Principal": {
+                       "Service": [ "codebuild.amazonaws.com" ]
+                    },
+                    "Action": [ "sts:AssumeRole" ]
+                 } ]
+              },
+              "Path": "/",
+              "Policies": [
+                {
+                    "PolicyName": "CodeBuildAccess",
+                    "PolicyDocument": {
+                      "Version": "2012-10-17",
+                      "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Resource": [
+                                {"Fn::Sub": "arn:aws:s3:::codepipeline-${AWS::Region}-*"}
+                            ],
+                            "Action": [
+                                "s3:PutObject",
+                                "s3:GetObject",
+                                "s3:GetObjectVersion",
+                                "s3:GetBucketAcl",
+                                "s3:GetBucketLocation"
+                            ]
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Resource": [
+                                {
+                                    "Fn::GetAtt": [
+                                        "ArtifactBucket",
+                                        "Arn"
+                                    ]
+                                },
+                                {"Fn::Join": [
+                                    "",
+                                    [
+                                        {
+                                            "Fn::GetAtt": [
+                                                "ArtifactBucket",
+                                                "Arn"
+                                            ]
+                                        },
+                                        "/*"
+                                    ]
+                                ]}
+                            ],
+                            "Action": [
+                                "s3:PutObject",
+                                "s3:GetObject",
+                                "s3:GetBucketAcl",
+                                "s3:GetBucketLocation"
+                            ]
+                        }
+                      ]
+                    }
+                  }
+              ]
+           }
+          },
+
+          "BuildLogPolicy": {
+            "Type": "AWS::IAM::Policy",
+            "Properties": {
+               "PolicyName": "BuildLogAccess",
+               "PolicyDocument": {
+                  "Version" : "2012-10-17",
+                  "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Resource": [
+                            {"Fn::Sub": [
+                                "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${project}",
+                                {"project": {
+                                    "Ref": "AppBuildProject"
+                                    }
+                                }
+                                ]
+                            },
+                            {"Fn::Sub": [
+                                "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${project}:*",
+                                {"project": {
+                                    "Ref": "AppBuildProject"
+                                    }
+                                }
+                                ]
+                            }
+                        ],
+                        "Action": [
+                            "logs:CreateLogGroup",
+                            "logs:CreateLogStream",
+                            "logs:PutLogEvents"
+                        ]
+                    }
+                    ]
+               },
+               "Roles": [ { "Ref": "AppBuildRole" }]
+            }
+         },
+
+    "CodePipelineServiceRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Action": [
+                "sts:AssumeRole"
+              ],
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "codepipeline.amazonaws.com"
+                ]
+              }
+            }
+          ]
+        },
+        "Path": "/service-role/",
+        "Policies": [
+          {
+            "PolicyName": "ec2codedeploy",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "ArtifactBucket",
+                        "Arn"
+                      ]
+                    },
+                    {
+                      "Fn::Join": [
+                        "",
+                        [
+                          {
+                            "Fn::GetAtt": [
+                              "ArtifactBucket",
+                              "Arn"
+                            ]
+                          },
+                          "/*"
+                        ]
+                      ]
+                    }
+                  ],
+                  "Action": [
+                    "s3:PutObject",
+                    "s3:GetObject",
+                    "s3:GetBucketAcl",
+                    "s3:GetBucketLocation"
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "codebuild:BatchGetBuilds",
+                    "codebuild:StartBuild"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "AppBuildProject",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "AppCodePipeline": {
+        "Type": "AWS::CodePipeline::Pipeline",
+        "Properties": {
+            "ArtifactStore": {
+            "Location": {
+                "Ref": "ArtifactBucket"
+            },
+            "Type": "S3"
+            },
+            "RoleArn": {
+            "Fn::GetAtt": [
+                "CodePipelineServiceRole",
+                "Arn"
+            ]
+            },
+            "Stages": [
+            {
+                "Name": "Source",
+                "Actions": [
+                {
+                    "Name": "GetSource",
+                    "ActionTypeId": {
+                    "Category": "Source",
+                    "Owner": "ThirdParty",
+                    "Provider": "GitHub",
+                    "Version": "1"
+                    },
+                    "Configuration": {
+                    "Owner": {
+                        "Ref": "GitHubUsername"
+                    },
+                    "Repo": {
+                        "Ref": "GitHubRepositoryName"
+                    },
+                    "Branch": {
+                        "Ref": "GitHubBranchName"
+                    },
+                    "OAuthToken": {
+                        "Ref": "GitHubAccessToken"
+                    },
+                    "PollForSourceChanges": "false"
+                    },
+                    "OutputArtifacts": [
+                    {
+                        "Name": "SourceCode"
+                    }
+                    ],
+                    "RunOrder": 1
+                }
+                ]
+            },
+            {
+                "Name": "Build",
+                "Actions": [
+                {
+                    "Name": "BuildSource",
+                    "InputArtifacts": [
+                    {
+                        "Name": "SourceCode"
+                    }
+                    ],
+                    "ActionTypeId": {
+                    "Category": "Build",
+                    "Owner": "AWS",
+                    "Provider": "CodeBuild",
+                    "Version": "1"
+                    },
+                    "Configuration": {
+                    "ProjectName": {
+                        "Ref": "AppBuildProject"
+                    }
+                    },
+                    "OutputArtifacts": [
+                    {
+                        "Name": "BuildArtifact"
+                    }
+                    ],
+                    "RunOrder": 1
+                }
+                ]
+            }
+            ]
+        }
+        }
+    }
+}
